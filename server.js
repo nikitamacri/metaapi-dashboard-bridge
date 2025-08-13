@@ -1,26 +1,32 @@
 import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
-console.log("METAAPI_TOKEN:", process.env.METAAPI_TOKEN);
-console.log("ACCOUNT_ID_MARCO:", process.env.ACCOUNT_ID_MARCO);
-console.log("ACCOUNT_ID_ALESSIO:", process.env.ACCOUNT_ID_ALESSIO);
+import MetaApi from 'metaapi.cloud-sdk';
+
+// ====== CONFIG ======
 const app = express();
 app.use(cors());
 app.use(express.urlencoded({ extended: true })); // per leggere il form POST
 
-// ====== CONFIG ======
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || 'cambia-questa-frase';
 
-const ACCOUNTS = {
-  'marco-sabelli': { displayName: 'Marco Sabelli' },
-  'alessio-gallina': { displayName: 'Alessio Gallina' }
-};
-
-// utenti e password (temporanee; poi le mettiamo come ENV su Render)
+// utenti/password (da ENV su Render, con fallback per test locale)
 const USERS = {
   'marco-sabelli': process.env.PASS_MARCO || 'marco123',
   'alessio-gallina': process.env.PASS_ALESSIO || 'alessio123'
+};
+
+// mapping account -> MetaApi Account ID (da ENV su Render)
+const ACCOUNTS = {
+  'marco-sabelli': {
+    displayName: 'Marco Sabelli',
+    metaapiAccountId: process.env.ACCOUNT_ID_MARCO
+  },
+  'alessio-gallina': {
+    displayName: 'Alessio Gallina',
+    metaapiAccountId: process.env.ACCOUNT_ID_ALESSIO
+  }
 };
 
 // ====== SESSIONE ======
@@ -78,19 +84,42 @@ app.get('/dashboard', requireAuth, (req, res) => {
   `);
 });
 
-app.get('/dashboard/:slug', requireAuth, (req, res) => {
+app.get('/dashboard/:slug', requireAuth, async (req, res) => {
   const { slug } = req.params;
   const me = req.session.userSlug;
   if (slug !== me) return res.status(403).send('Non puoi vedere la dashboard di un altro utente. <a href="/dashboard">Torna</a>');
 
   const info = ACCOUNTS[slug];
+
+  // === FETCH DATI DA METAAPI (snapshot rapido) ===
+  let balance = '—', equity = '—', updatedAt = '—', errMsg = '';
+  try {
+    if (!info?.metaapiAccountId) throw new Error('Account ID mancante per questo utente');
+    const api = new MetaApi(process.env.METAAPI_TOKEN);
+    const mtAcc = await api.metatraderAccountApi.getAccount(info.metaapiAccountId);
+    const conn = mtAcc.getRPCConnection();
+
+    await conn.connect();
+    await conn.waitSynchronized();
+
+    const ainfo = await conn.getAccountInformation();
+    balance = ainfo?.balance?.toFixed(2);
+    equity  = ainfo?.equity?.toFixed(2);
+    updatedAt = new Date().toLocaleString();
+
+    await conn.disconnect();
+  } catch (e) {
+    errMsg = e.message || 'Errore connessione MetaApi';
+    console.log('MetaApi error:', errMsg);
+  }
+
   res.send(`
     <h2>Dashboard di ${info.displayName}</h2>
     <div style="padding:10px;border:1px solid #ccc;margin:10px 0;">
-      <p><b>Balance:</b> —</p>
-      <p><b>Equity:</b> —</p>
-      <p><b>Ultimo aggiornamento:</b> —</p>
-      <p>(I dati MetaApi li aggiungeremo dopo)</p>
+      <p><b>Balance:</b> ${balance}</p>
+      <p><b>Equity:</b> ${equity}</p>
+      <p><b>Ultimo aggiornamento:</b> ${updatedAt}</p>
+      ${errMsg ? `<p style="color:red;">${errMsg}</p>` : ''}
     </div>
     <p><a href="/dashboard">Torna all'area personale</a></p>
   `);
