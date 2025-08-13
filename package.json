@@ -1,0 +1,12 @@
+{
+  "name": "metaapi-dashboard-bridge",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "module",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
+    "metaapi.cloud-sdk": "^14.0.0"
+  }
+}
