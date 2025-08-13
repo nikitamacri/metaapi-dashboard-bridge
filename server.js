@@ -1,8 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
-// Usa la build ESM per Node dell'SDK MetaApi (risolve "MetaApi is not a constructor")
-import MetaApi from 'metaapi.cloud-sdk/esm-node';
+import MetaApi from 'metaapi.cloud-sdk';
 
 // ====== CONFIG ======
 const app = express();
