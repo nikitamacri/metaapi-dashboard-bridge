@@ -1,24 +1,33 @@
 import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
-import MetaApi from 'metaapi.cloud-sdk'; // ✅ import corretto
-console.log('MetaApi importato:', typeof MetaApi);
 
-// ====== CONFIG ======
+// --- Import robusto dell'SDK MetaApi (gestisce default/named export) ---
+import * as MetaApiModule from 'metaapi.cloud-sdk';
+function resolveMetaApiCtor(mod) {
+  if (typeof mod === 'function') return mod;                 // modulo stesso = costruttore
+  if (mod && typeof mod.default === 'function') return mod.default; // export default
+  if (mod && typeof mod.MetaApi === 'function') return mod.MetaApi; // export nominato
+  console.log('MetaApi module keys:', Object.keys(mod || {}));
+  throw new Error('MetaApi constructor not found in module exports');
+}
+const MetaApiCtor = resolveMetaApiCtor(MetaApiModule);
+console.log('MetaApiCtor typeof:', typeof MetaApiCtor);
+
+// --- Config base ---
 const app = express();
 app.use(cors());
 app.use(express.urlencoded({ extended: true })); // per leggere i form POST
-
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || 'cambia-questa-frase';
 
-// Utenti/password (da ENV su Render, con fallback per test locale)
+// --- Credenziali demo (meglio metterle come ENV su Render) ---
 const USERS = {
   'marco-sabelli': process.env.PASS_MARCO || 'marco123',
   'alessio-gallina': process.env.PASS_ALESSIO || 'alessio123'
 };
 
-// Mapping account -> MetaApi Account ID (da ENV su Render)
+// --- Mappa account → MetaApi Account ID (da ENV su Render) ---
 const ACCOUNTS = {
   'marco-sabelli': {
     displayName: 'Marco Sabelli',
@@ -30,23 +39,23 @@ const ACCOUNTS = {
   }
 };
 
-// ====== SESSIONE ======
+// --- Sessione ---
 app.use(session({
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false
 }));
 
-// ====== HEALTHCHECK (per Render) ======
+// --- Healthcheck per Render ---
 app.get('/healthz', (_req, res) => res.status(200).send('OK'));
 
-// ====== MIDDLEWARE AUTH ======
+// --- Middleware auth ---
 function requireAuth(req, res, next) {
   if (!req.session?.userSlug) return res.redirect('/login');
   next();
 }
 
-// ====== ROTTE PUBBLICHE ======
+// --- Rotte pubbliche ---
 app.get('/', (_req, res) => {
   res.send('<h1>Benvenuto</h1><p><a href="/login">Vai al login</a></p>');
 });
@@ -76,7 +85,7 @@ app.get('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
 });
 
-// ====== ROTTE PRIVATE ======
+// --- Area privata ---
 app.get('/dashboard', requireAuth, (req, res) => {
   const me = req.session.userSlug;
   const info = ACCOUNTS[me];
@@ -88,24 +97,26 @@ app.get('/dashboard', requireAuth, (req, res) => {
   `);
 });
 
+// --- Dashboard utente (balance/equity da MetaApi) ---
 app.get('/dashboard/:slug', requireAuth, async (req, res) => {
   const { slug } = req.params;
   const me = req.session.userSlug;
-  if (slug !== me) return res.status(403).send('Non puoi vedere la dashboard di un altro utente. <a href="/dashboard">Torna</a>');
+  if (slug !== me) {
+    return res.status(403).send('Non puoi vedere la dashboard di un altro utente. <a href="/dashboard">Torna</a>');
+  }
 
   const info = ACCOUNTS[slug];
-
-  // === FETCH DATI DA METAAPI (snapshot rapido) ===
   let balance = '—', equity = '—', updatedAt = '—', errMsg = '';
+
   try {
     if (!info?.metaapiAccountId) throw new Error('Account ID mancante per questo utente');
 
-    const api = new MetaApi(process.env.METAAPI_TOKEN); // ✅ istanziazione corretta
+    const api = new MetaApiCtor(process.env.METAAPI_TOKEN);
     const mtAcc = await api.metatraderAccountApi.getAccount(info.metaapiAccountId);
     const conn = mtAcc.getRPCConnection();
 
     await conn.connect();
-    await conn.waitSynchronized();
+    await conn.waitSynchronized(); // prima sync può richiedere qualche secondo
 
     const ainfo = await conn.getAccountInformation();
     balance = ainfo?.balance?.toFixed(2);
@@ -114,7 +125,7 @@ app.get('/dashboard/:slug', requireAuth, async (req, res) => {
 
     await conn.disconnect();
   } catch (e) {
-    errMsg = e.message || 'Errore connessione MetaApi';
+    errMsg = e?.message || 'Errore connessione MetaApi';
     console.log('MetaApi error:', errMsg);
   }
 
@@ -130,5 +141,5 @@ app.get('/dashboard/:slug', requireAuth, async (req, res) => {
   `);
 });
 
-// ====== AVVIO ======
+// --- Avvio ---
 app.listen(PORT, () => console.log(`Server avviato su porta ${PORT}`));
