@@ -1,24 +1,24 @@
 import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
-import * as MetaApiModule from 'metaapi.cloud-sdk';
-const MetaApi = MetaApiModule.default ?? MetaApiModule.MetaApi ?? MetaApiModule;
+// Usa la build ESM per Node dell'SDK MetaApi (risolve "MetaApi is not a constructor")
+import MetaApi from 'metaapi.cloud-sdk/esm-node';
 
 // ====== CONFIG ======
 const app = express();
 app.use(cors());
-app.use(express.urlencoded({ extended: true })); // per leggere il form POST
+app.use(express.urlencoded({ extended: true })); // per leggere i form POST
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || 'cambia-questa-frase';
 
-// utenti/password (da ENV su Render, con fallback per test locale)
+// Utenti/password (da ENV su Render, con fallback per test locale)
 const USERS = {
   'marco-sabelli': process.env.PASS_MARCO || 'marco123',
   'alessio-gallina': process.env.PASS_ALESSIO || 'alessio123'
 };
 
-// mapping account -> MetaApi Account ID (da ENV su Render)
+// Mapping account -> MetaApi Account ID (da ENV su Render)
 const ACCOUNTS = {
   'marco-sabelli': {
     displayName: 'Marco Sabelli',
@@ -37,6 +37,9 @@ app.use(session({
   saveUninitialized: false
 }));
 
+// ====== HEALTHCHECK (per Render) ======
+app.get('/healthz', (_req, res) => res.status(200).send('OK'));
+
 // ====== MIDDLEWARE AUTH ======
 function requireAuth(req, res, next) {
   if (!req.session?.userSlug) return res.redirect('/login');
@@ -44,11 +47,11 @@ function requireAuth(req, res, next) {
 }
 
 // ====== ROTTE PUBBLICHE ======
-app.get('/', (req, res) => {
+app.get('/', (_req, res) => {
   res.send('<h1>Benvenuto</h1><p><a href="/login">Vai al login</a></p>');
 });
 
-app.get('/login', (req, res) => {
+app.get('/login', (_req, res) => {
   res.send(`
     <h2>Login</h2>
     <form method="POST" action="/login">
@@ -96,6 +99,7 @@ app.get('/dashboard/:slug', requireAuth, async (req, res) => {
   let balance = '—', equity = '—', updatedAt = '—', errMsg = '';
   try {
     if (!info?.metaapiAccountId) throw new Error('Account ID mancante per questo utente');
+
     const api = new MetaApi(process.env.METAAPI_TOKEN);
     const mtAcc = await api.metatraderAccountApi.getAccount(info.metaapiAccountId);
     const conn = mtAcc.getRPCConnection();
