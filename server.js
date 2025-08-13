@@ -2,32 +2,43 @@ import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
 
-// --- Import robusto dell'SDK MetaApi (gestisce default/named export) ---
+// --- Import SDK MetaApi e risoluzione costruttore ---
+// Dai tuoi log: exports = { default: { MetaApi, ... }, MetaStats, CopyFactory, ... }
 import * as MetaApiModule from 'metaapi.cloud-sdk';
+
+// (debug utile nei log Render; puoi rimuoverli dopo i test)
+console.log('MetaApi module keys:', Object.keys(MetaApiModule || {}));
+console.log('MetaApi default keys:', Object.keys((MetaApiModule && MetaApiModule.default) || {}));
+
 function resolveMetaApiCtor(mod) {
-  if (typeof mod === 'function') return mod;                 // modulo stesso = costruttore
-  if (mod && typeof mod.default === 'function') return mod.default; // export default
-  if (mod && typeof mod.MetaApi === 'function') return mod.MetaApi; // export nominato
-  console.log('MetaApi module keys:', Object.keys(mod || {}));
-  throw new Error('MetaApi constructor not found in module exports');
+  // 1) export nominato diretto
+  if (mod && typeof mod.MetaApi === 'function') return mod.MetaApi;
+  // 2) export default che contiene la classe (CASO DEI TUOI LOG)
+  if (mod && mod.default && typeof mod.default.MetaApi === 'function') return mod.default.MetaApi;
+  // 3) export default direttamente funzione
+  if (mod && typeof mod.default === 'function') return mod.default;
+  // 4) modulo stesso come funzione
+  if (typeof mod === 'function') return mod;
+  throw new Error('MetaApi constructor not found (neither mod.MetaApi nor mod.default.MetaApi)');
 }
+
 const MetaApiCtor = resolveMetaApiCtor(MetaApiModule);
 console.log('MetaApiCtor typeof:', typeof MetaApiCtor);
 
-// --- Config base ---
+// ====== CONFIG BASE ======
 const app = express();
 app.use(cors());
-app.use(express.urlencoded({ extended: true })); // per leggere i form POST
+app.use(express.urlencoded({ extended: true })); // legge i form POST
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || 'cambia-questa-frase';
 
-// --- Credenziali demo (meglio metterle come ENV su Render) ---
+// ====== UTENTI (meglio da ENV su Render) ======
 const USERS = {
   'marco-sabelli': process.env.PASS_MARCO || 'marco123',
   'alessio-gallina': process.env.PASS_ALESSIO || 'alessio123'
 };
 
-// --- Mappa account → MetaApi Account ID (da ENV su Render) ---
+// ====== MAPPA ACCOUNT → MetaApi Account ID (da ENV su Render) ======
 const ACCOUNTS = {
   'marco-sabelli': {
     displayName: 'Marco Sabelli',
@@ -39,23 +50,23 @@ const ACCOUNTS = {
   }
 };
 
-// --- Sessione ---
+// ====== SESSIONE ======
 app.use(session({
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false
 }));
 
-// --- Healthcheck per Render ---
+// ====== HEALTHCHECK (Render) ======
 app.get('/healthz', (_req, res) => res.status(200).send('OK'));
 
-// --- Middleware auth ---
+// ====== MIDDLEWARE AUTH ======
 function requireAuth(req, res, next) {
   if (!req.session?.userSlug) return res.redirect('/login');
   next();
 }
 
-// --- Rotte pubbliche ---
+// ====== ROTTE PUBBLICHE ======
 app.get('/', (_req, res) => {
   res.send('<h1>Benvenuto</h1><p><a href="/login">Vai al login</a></p>');
 });
@@ -85,7 +96,7 @@ app.get('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
 });
 
-// --- Area privata ---
+// ====== AREA PRIVATA ======
 app.get('/dashboard', requireAuth, (req, res) => {
   const me = req.session.userSlug;
   const info = ACCOUNTS[me];
@@ -97,7 +108,7 @@ app.get('/dashboard', requireAuth, (req, res) => {
   `);
 });
 
-// --- Dashboard utente (balance/equity da MetaApi) ---
+// ====== DASHBOARD UTENTE (balance/equity da MetaApi) ======
 app.get('/dashboard/:slug', requireAuth, async (req, res) => {
   const { slug } = req.params;
   const me = req.session.userSlug;
@@ -141,5 +152,5 @@ app.get('/dashboard/:slug', requireAuth, async (req, res) => {
   `);
 });
 
-// --- Avvio ---
+// ====== AVVIO ======
 app.listen(PORT, () => console.log(`Server avviato su porta ${PORT}`));
