@@ -1,74 +1,54 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
 
-// ========== IMPORT METAAPI (robusto) ==========
-// Tenta prima la build ESM per Node, poi usa il pacchetto standard e risolve il costruttore.
-import MetaApiESM from 'metaapi.cloud-sdk/esm-node';
-import * as MetaApiPkg from 'metaapi.cloud-sdk';
-
-function resolveMetaApiCtor() {
-  // 1) Se la build ESM exporta direttamente la classe
-  if (typeof MetaApiESM === 'function') return MetaApiESM;
-  // 2) Se il pacchetto standard ha default.MetaApi (molto comune)
-  if (MetaApiPkg?.default?.MetaApi && typeof MetaApiPkg.default.MetaApi === 'function') return MetaApiPkg.default.MetaApi;
-  // 3) Se il pacchetto standard esporta la classe come named export
-  if (typeof MetaApiPkg?.MetaApi === 'function') return MetaApiPkg.MetaApi;
-  // 4) Se il pacchetto standard ha default come funzione/classe
-  if (typeof MetaApiPkg?.default === 'function') return MetaApiPkg.default;
-  // 5) Ultima chance: il modulo stesso è funzione
-  if (typeof MetaApiPkg === 'function') return MetaApiPkg;
-  return null;
-}
-const MetaApi = resolveMetaApiCtor();
-
-console.log('MetaApi resolved type:', typeof MetaApi);
-
-// ========== CONFIG BASE ==========
+// ===== CONFIG BASE =====
 const app = express();
 app.use(cors());
-app.use(express.urlencoded({ extended: true })); // per leggere i form POST
-app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // per form POST
+app.use(express.json()); // per JSON dal WebRequest dell'EA
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || 'cambia-questa-frase';
-const META_TIMEOUT_MS = 15000; // 15s max per le operazioni MetaApi
 
-// ========== UTENTI (usa ENV su Render per cambiarle) ==========
+// ===== UTENTI (meglio come ENV su Render) =====
 const USERS = {
   'marco-sabelli': process.env.PASS_MARCO || 'marco123',
   'alessio-gallina': process.env.PASS_ALESSIO || 'alessio123'
 };
 
-// ========== MAPPA ACCOUNT → MetaApi Account ID (da ENV) ==========
+// ===== MAPPA ACCOUNT → LOGIN MT5 (impostali su Render) =====
 const ACCOUNTS = {
   'marco-sabelli': {
     displayName: 'Marco Sabelli',
-    metaapiAccountId: process.env.ACCOUNT_ID_MARCO
+    loginMT: process.env.LOGIN_MARCO // es. 5039103835
   },
   'alessio-gallina': {
     displayName: 'Alessio Gallina',
-    metaapiAccountId: process.env.ACCOUNT_ID_ALESSIO
+    loginMT: process.env.LOGIN_ALESSIO // es. 5012345678
   }
 };
 
-// ========== SESSIONE ==========
+// ===== ARCHIVIO IN RAM DI ULTIMO DATO ARRIVATO DALL'EA =====
+const LATEST_BY_LOGIN = Object.create(null);
+
+// ===== SESSIONE =====
 app.use(session({
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false
 }));
 
-// ========== HEALTHCHECK per Render ==========
+// ===== HEALTHCHECK =====
 app.get('/healthz', (_req, res) => res.status(200).send('OK'));
 
-// ========== MIDDLEWARE AUTH ==========
+// ===== LOGIN =====
 function requireAuth(req, res, next) {
   if (!req.session?.userSlug) return res.redirect('/login');
   next();
 }
 
-// ========== ROTTE PUBBLICHE ==========
 app.get('/', (_req, res) => {
   res.send('<h1>Benvenuto</h1><p><a href="/login">Vai al login</a></p>');
 });
@@ -98,7 +78,7 @@ app.get('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
 });
 
-// ========== AREA PRIVATA ==========
+// ===== AREA PRIVATA =====
 app.get('/dashboard', requireAuth, (req, res) => {
   const me = req.session.userSlug;
   const info = ACCOUNTS[me];
@@ -110,20 +90,66 @@ app.get('/dashboard', requireAuth, (req, res) => {
   `);
 });
 
-// ========== DIAGNOSTICA RAPIDA ==========
-app.get('/diag/:slug', async (req, res) => {
-  const { slug } = req.params;
-  const accountId = ACCOUNTS[slug]?.metaapiAccountId || null;
-  res.json({
-    slug,
-    hasMetaApiCtor: typeof MetaApi === 'function',
-    metaapiTokenSet: !!process.env.METAAPI_TOKEN,
-    accountId
-  });
+// ===== ENDPOINT RICEZIONE DATI DA EA (MT5) =====
+app.post('/update', (req, res) => {
+  try {
+    const required = process.env.EA_SHARED_SECRET;
+    if (!required) return res.status(500).json({ ok: false, error: 'EA_SHARED_SECRET mancante su server' });
+
+    const {
+      apiKey, platform, login, server, name,
+      balance, equity, margin_free, positions, timestamp
+    } = req.body || {};
+
+    if (apiKey !== required) return res.status(401).json({ ok: false, error: 'API key invalid' });
+    if (!login) return res.status(400).json({ ok: false, error: 'login mancante' });
+
+    LATEST_BY_LOGIN[String(login)] = {
+      platform, login, server, name,
+      balance, equity, margin_free,
+      positions: Array.isArray(positions) ? positions : [],
+      receivedAt: new Date().toISOString(),
+      reportedAt: timestamp || null
+    };
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('update error:', e);
+    return res.status(500).json({ ok: false, error: 'server error' });
+  }
 });
 
-// ========== DASHBOARD UTENTE (balance/equity da MetaApi) ==========
-app.get('/dashboard/:slug', requireAuth, async (req, res) => {
+// ===== DIAGNOSTICA RAPIDA =====
+// Elenco degli slug disponibili e stato ultimo pacchetto
+app.get('/diag', (req, res) => {
+  const slugs = Object.keys(ACCOUNTS);
+  const out = slugs.map(s => {
+    const login = ACCOUNTS[s]?.loginMT ? String(ACCOUNTS[s].loginMT) : null;
+    return {
+      slug: s,
+      loginMT: login,
+      hasLoginConfigured: !!login,
+      hasSecret: !!process.env.EA_SHARED_SECRET,
+      lastPacketExists: login ? !!LATEST_BY_LOGIN[login] : false
+    };
+  });
+  res.json({ ok: true, slugs: out });
+});
+
+// Diagnosi per uno specifico utente
+app.get('/diag/:slug', (req, res) => {
+  const { slug } = req.params;
+  const login = ACCOUNTS[slug]?.loginMT ? String(ACCOUNTS[slug].loginMT) : null;
+  res.json({
+    ok: true,
+    slug,
+    loginMT: login,
+    hasLoginConfigured: !!login,
+    hasSecret: !!process.env.EA_SHARED_SECRET,
+    lastPacket: login ? (LATEST_BY_LOGIN[login] || null) : null
+  });
+});
+// ===== DASHBOARD (usa dati EA) =====
+app.get('/dashboard/:slug', requireAuth, (req, res) => {
   const { slug } = req.params;
   const me = req.session.userSlug;
   if (slug !== me) {
@@ -131,66 +157,33 @@ app.get('/dashboard/:slug', requireAuth, async (req, res) => {
   }
 
   const info = ACCOUNTS[slug];
-  let balance = '—', equity = '—', updatedAt = '—', errMsg = '';
+  const login = info?.loginMT ? String(info.loginMT) : null;
+  const data = login ? LATEST_BY_LOGIN[login] : null;
 
-  try {
-    if (!MetaApi) throw new Error('SDK MetaApi non inizializzato (import)');
-    if (!process.env.METAAPI_TOKEN) throw new Error('METAAPI_TOKEN mancante (Environment su Render)');
-    if (!info?.metaapiAccountId) throw new Error('Account ID mancante per questo utente');
+  const balance = data?.balance ?? '—';
+  const equity  = data?.equity  ?? '—';
+  const updated = data?.receivedAt ? new Date(data.receivedAt).toLocaleString() : '—';
+  const msg = data ? '' : `<p style="color:#a00">Nessun dato ancora ricevuto. Assicurati che l'EA sia attivo e che WebRequest sia abilitato.</p>`;
 
-    const api = new MetaApi(process.env.METAAPI_TOKEN);
-    const mtAcc = await api.metatraderAccountApi.getAccount(info.metaapiAccountId);
-
-    // Assicura che l'account sia deployato e connesso
-    const deployConnect = (async () => {
-      if (mtAcc.state !== 'DEPLOYED') {
-        await mtAcc.deploy();
-      }
-      await mtAcc.waitConnected(); // attende connessione lato MetaApi
-    })();
-
-    // Timeout di sicurezza per non bloccare la pagina
-    await Promise.race([
-      deployConnect,
-      new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout connessione MetaApi')), META_TIMEOUT_MS))
-    ]);
-
-    // Ora usa la connessione RPC per leggere dati
-    const conn = mtAcc.getRPCConnection();
-
-    const connectAndFetch = (async () => {
-      await conn.connect();
-      await conn.waitSynchronized();
-      const ainfo = await conn.getAccountInformation();
-      await conn.disconnect();
-      return ainfo;
-    })();
-
-    const ainfo = await Promise.race([
-      connectAndFetch,
-      new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout sincronizzazione RPC')), META_TIMEOUT_MS))
-    ]);
-
-    balance = ainfo?.balance?.toFixed(2);
-    equity  = ainfo?.equity?.toFixed(2);
-    updatedAt = new Date().toLocaleString();
-
-  } catch (e) {
-    errMsg = e?.message || 'Errore connessione MetaApi';
-    console.log('MetaApi error:', errMsg);
-  }
+  const posHtml = (data?.positions || []).map(p => {
+    return `<li>${p.symbol} ${p.type} ${p.volume} @ ${p.price} (P/L: ${p.profit})</li>`;
+  }).join('') || '<li>Nessuna posizione</li>';
 
   res.send(`
     <h2>Dashboard di ${info.displayName}</h2>
+    ${msg}
     <div style="padding:10px;border:1px solid #ccc;margin:10px 0;">
       <p><b>Balance:</b> ${balance}</p>
       <p><b>Equity:</b> ${equity}</p>
-      <p><b>Ultimo aggiornamento:</b> ${updatedAt}</p>
-      ${errMsg ? `<p style="color:red;">${errMsg}</p>` : ''}
+      <p><b>Ultimo aggiornamento:</b> ${updated}</p>
+    </div>
+    <div style="padding:10px;border:1px solid #ccc;margin:10px 0;">
+      <b>Posizioni:</b>
+      <ul>${posHtml}</ul>
     </div>
     <p><a href="/dashboard">Torna all'area personale</a></p>
   `);
 });
 
-// ========== AVVIO ==========
+// ===== AVVIO =====
 app.listen(PORT, () => console.log(`Server avviato su porta ${PORT}`));
