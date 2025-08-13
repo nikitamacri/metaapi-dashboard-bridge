@@ -2,33 +2,37 @@ import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
 
-// --- Import SDK MetaApi e risoluzione costruttore ---
-// Dai tuoi log: exports = { default: { MetaApi, ... }, MetaStats, CopyFactory, ... }
+// === Import SDK MetaApi con risoluzione SUPER-ROBUSTA (non fa crashare il server) ===
 import * as MetaApiModule from 'metaapi.cloud-sdk';
 
-// (debug utile nei log Render; puoi rimuoverli dopo i test)
+// Debug utili nei log Render (puoi rimuoverli dopo)
 console.log('MetaApi module keys:', Object.keys(MetaApiModule || {}));
 console.log('MetaApi default keys:', Object.keys((MetaApiModule && MetaApiModule.default) || {}));
 
-function resolveMetaApiCtor(mod) {
-  // 1) export nominato diretto
-  if (mod && typeof mod.MetaApi === 'function') return mod.MetaApi;
-  // 2) export default che contiene la classe (CASO DEI TUOI LOG)
-  if (mod && mod.default && typeof mod.default.MetaApi === 'function') return mod.default.MetaApi;
-  // 3) export default direttamente funzione
-  if (mod && typeof mod.default === 'function') return mod.default;
-  // 4) modulo stesso come funzione
-  if (typeof mod === 'function') return mod;
-  throw new Error('MetaApi constructor not found (neither mod.MetaApi nor mod.default.MetaApi)');
+function tryResolveMetaApiCtor(mod) {
+  try {
+    // 1) export nominato diretto
+    if (mod && typeof mod.MetaApi === 'function') return mod.MetaApi;
+    // 2) export default che contiene la classe (caso visto nei tuoi log)
+    if (mod && mod.default && typeof mod.default.MetaApi === 'function') return mod.default.MetaApi;
+    // 3) export default direttamente funzione/classe
+    if (mod && typeof mod.default === 'function') return mod.default;
+    // 4) modulo stesso come funzione
+    if (typeof mod === 'function') return mod;
+  } catch (e) {
+    console.log('MetaApi resolve error:', e.message);
+  }
+  return null; // NON lanciare: così il server parte lo stesso
 }
 
-const MetaApiCtor = resolveMetaApiCtor(MetaApiModule);
+const MetaApiCtor = tryResolveMetaApiCtor(MetaApiModule);
 console.log('MetaApiCtor typeof:', typeof MetaApiCtor);
 
 // ====== CONFIG BASE ======
 const app = express();
 app.use(cors());
-app.use(express.urlencoded({ extended: true })); // legge i form POST
+app.use(express.urlencoded({ extended: true })); // legge form POST
+app.use(express.json()); // (non serve ora, ma utile)
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || 'cambia-questa-frase';
 
@@ -121,6 +125,11 @@ app.get('/dashboard/:slug', requireAuth, async (req, res) => {
 
   try {
     if (!info?.metaapiAccountId) throw new Error('Account ID mancante per questo utente');
+
+    // Se per qualunque motivo l’SDK non è stato risolto, non proviamo a istanziare
+    if (!MetaApiCtor) {
+      throw new Error('SDK MetaApi non inizializzato (controlla import/versione libreria)');
+    }
 
     const api = new MetaApiCtor(process.env.METAAPI_TOKEN);
     const mtAcc = await api.metatraderAccountApi.getAccount(info.metaapiAccountId);
