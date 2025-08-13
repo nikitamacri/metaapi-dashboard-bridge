@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
-import MetaApi from 'metaapi.cloud-sdk';
+import MetaApi from 'metaapi.cloud-sdk'; // ✅ import corretto
+console.log('MetaApi importato:', typeof MetaApi);
 
 // ====== CONFIG ======
 const app = express();
@@ -99,7 +100,7 @@ app.get('/dashboard/:slug', requireAuth, async (req, res) => {
   try {
     if (!info?.metaapiAccountId) throw new Error('Account ID mancante per questo utente');
 
-    const api = new MetaApi(process.env.METAAPI_TOKEN);
+    const api = new MetaApi(process.env.METAAPI_TOKEN); // ✅ istanziazione corretta
     const mtAcc = await api.metatraderAccountApi.getAccount(info.metaapiAccountId);
     const conn = mtAcc.getRPCConnection();
 
