@@ -1,7 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
-
+console.log("METAAPI_TOKEN:", process.env.METAAPI_TOKEN);
+console.log("ACCOUNT_ID_MARCO:", process.env.ACCOUNT_ID_MARCO);
+console.log("ACCOUNT_ID_ALESSIO:", process.env.ACCOUNT_ID_ALESSIO);
 const app = express();
 app.use(cors());
 app.use(express.urlencoded({ extended: true })); // per leggere il form POST
