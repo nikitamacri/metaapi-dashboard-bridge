@@ -2,47 +2,45 @@ import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
 
-// === Import SDK MetaApi con risoluzione SUPER-ROBUSTA (non fa crashare il server) ===
-import * as MetaApiModule from 'metaapi.cloud-sdk';
+// ========== IMPORT METAAPI (robusto) ==========
+// Tenta prima la build ESM per Node, poi usa il pacchetto standard e risolve il costruttore.
+import MetaApiESM from 'metaapi.cloud-sdk/esm-node';
+import * as MetaApiPkg from 'metaapi.cloud-sdk';
 
-// Debug utili nei log Render (puoi rimuoverli dopo)
-console.log('MetaApi module keys:', Object.keys(MetaApiModule || {}));
-console.log('MetaApi default keys:', Object.keys((MetaApiModule && MetaApiModule.default) || {}));
-
-function tryResolveMetaApiCtor(mod) {
-  try {
-    // 1) export nominato diretto
-    if (mod && typeof mod.MetaApi === 'function') return mod.MetaApi;
-    // 2) export default che contiene la classe (caso visto nei tuoi log)
-    if (mod && mod.default && typeof mod.default.MetaApi === 'function') return mod.default.MetaApi;
-    // 3) export default direttamente funzione/classe
-    if (mod && typeof mod.default === 'function') return mod.default;
-    // 4) modulo stesso come funzione
-    if (typeof mod === 'function') return mod;
-  } catch (e) {
-    console.log('MetaApi resolve error:', e.message);
-  }
-  return null; // NON lanciare: così il server parte lo stesso
+function resolveMetaApiCtor() {
+  // 1) Se la build ESM exporta direttamente la classe
+  if (typeof MetaApiESM === 'function') return MetaApiESM;
+  // 2) Se il pacchetto standard ha default.MetaApi (molto comune)
+  if (MetaApiPkg?.default?.MetaApi && typeof MetaApiPkg.default.MetaApi === 'function') return MetaApiPkg.default.MetaApi;
+  // 3) Se il pacchetto standard esporta la classe come named export
+  if (typeof MetaApiPkg?.MetaApi === 'function') return MetaApiPkg.MetaApi;
+  // 4) Se il pacchetto standard ha default come funzione/classe
+  if (typeof MetaApiPkg?.default === 'function') return MetaApiPkg.default;
+  // 5) Ultima chance: il modulo stesso è funzione
+  if (typeof MetaApiPkg === 'function') return MetaApiPkg;
+  return null;
 }
+const MetaApi = resolveMetaApiCtor();
 
-const MetaApiCtor = tryResolveMetaApiCtor(MetaApiModule);
-console.log('MetaApiCtor typeof:', typeof MetaApiCtor);
+console.log('MetaApi resolved type:', typeof MetaApi);
 
-// ====== CONFIG BASE ======
+// ========== CONFIG BASE ==========
 const app = express();
 app.use(cors());
-app.use(express.urlencoded({ extended: true })); // legge form POST
-app.use(express.json()); // (non serve ora, ma utile)
+app.use(express.urlencoded({ extended: true })); // per leggere i form POST
+app.use(express.json());
+
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || 'cambia-questa-frase';
+const META_TIMEOUT_MS = 15000; // 15s max per le operazioni MetaApi
 
-// ====== UTENTI (meglio da ENV su Render) ======
+// ========== UTENTI (usa ENV su Render per cambiarle) ==========
 const USERS = {
   'marco-sabelli': process.env.PASS_MARCO || 'marco123',
   'alessio-gallina': process.env.PASS_ALESSIO || 'alessio123'
 };
 
-// ====== MAPPA ACCOUNT → MetaApi Account ID (da ENV su Render) ======
+// ========== MAPPA ACCOUNT → MetaApi Account ID (da ENV) ==========
 const ACCOUNTS = {
   'marco-sabelli': {
     displayName: 'Marco Sabelli',
@@ -54,23 +52,23 @@ const ACCOUNTS = {
   }
 };
 
-// ====== SESSIONE ======
+// ========== SESSIONE ==========
 app.use(session({
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false
 }));
 
-// ====== HEALTHCHECK (Render) ======
+// ========== HEALTHCHECK per Render ==========
 app.get('/healthz', (_req, res) => res.status(200).send('OK'));
 
-// ====== MIDDLEWARE AUTH ======
+// ========== MIDDLEWARE AUTH ==========
 function requireAuth(req, res, next) {
   if (!req.session?.userSlug) return res.redirect('/login');
   next();
 }
 
-// ====== ROTTE PUBBLICHE ======
+// ========== ROTTE PUBBLICHE ==========
 app.get('/', (_req, res) => {
   res.send('<h1>Benvenuto</h1><p><a href="/login">Vai al login</a></p>');
 });
@@ -100,7 +98,7 @@ app.get('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
 });
 
-// ====== AREA PRIVATA ======
+// ========== AREA PRIVATA ==========
 app.get('/dashboard', requireAuth, (req, res) => {
   const me = req.session.userSlug;
   const info = ACCOUNTS[me];
@@ -112,7 +110,19 @@ app.get('/dashboard', requireAuth, (req, res) => {
   `);
 });
 
-// ====== DASHBOARD UTENTE (balance/equity da MetaApi) ======
+// ========== DIAGNOSTICA RAPIDA ==========
+app.get('/diag/:slug', async (req, res) => {
+  const { slug } = req.params;
+  const accountId = ACCOUNTS[slug]?.metaapiAccountId || null;
+  res.json({
+    slug,
+    hasMetaApiCtor: typeof MetaApi === 'function',
+    metaapiTokenSet: !!process.env.METAAPI_TOKEN,
+    accountId
+  });
+});
+
+// ========== DASHBOARD UTENTE (balance/equity da MetaApi) ==========
 app.get('/dashboard/:slug', requireAuth, async (req, res) => {
   const { slug } = req.params;
   const me = req.session.userSlug;
@@ -124,26 +134,47 @@ app.get('/dashboard/:slug', requireAuth, async (req, res) => {
   let balance = '—', equity = '—', updatedAt = '—', errMsg = '';
 
   try {
+    if (!MetaApi) throw new Error('SDK MetaApi non inizializzato (import)');
+    if (!process.env.METAAPI_TOKEN) throw new Error('METAAPI_TOKEN mancante (Environment su Render)');
     if (!info?.metaapiAccountId) throw new Error('Account ID mancante per questo utente');
 
-    // Se per qualunque motivo l’SDK non è stato risolto, non proviamo a istanziare
-    if (!MetaApiCtor) {
-      throw new Error('SDK MetaApi non inizializzato (controlla import/versione libreria)');
-    }
-
-    const api = new MetaApiCtor(process.env.METAAPI_TOKEN);
+    const api = new MetaApi(process.env.METAAPI_TOKEN);
     const mtAcc = await api.metatraderAccountApi.getAccount(info.metaapiAccountId);
+
+    // Assicura che l'account sia deployato e connesso
+    const deployConnect = (async () => {
+      if (mtAcc.state !== 'DEPLOYED') {
+        await mtAcc.deploy();
+      }
+      await mtAcc.waitConnected(); // attende connessione lato MetaApi
+    })();
+
+    // Timeout di sicurezza per non bloccare la pagina
+    await Promise.race([
+      deployConnect,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout connessione MetaApi')), META_TIMEOUT_MS))
+    ]);
+
+    // Ora usa la connessione RPC per leggere dati
     const conn = mtAcc.getRPCConnection();
 
-    await conn.connect();
-    await conn.waitSynchronized(); // prima sync può richiedere qualche secondo
+    const connectAndFetch = (async () => {
+      await conn.connect();
+      await conn.waitSynchronized();
+      const ainfo = await conn.getAccountInformation();
+      await conn.disconnect();
+      return ainfo;
+    })();
 
-    const ainfo = await conn.getAccountInformation();
+    const ainfo = await Promise.race([
+      connectAndFetch,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout sincronizzazione RPC')), META_TIMEOUT_MS))
+    ]);
+
     balance = ainfo?.balance?.toFixed(2);
     equity  = ainfo?.equity?.toFixed(2);
     updatedAt = new Date().toLocaleString();
 
-    await conn.disconnect();
   } catch (e) {
     errMsg = e?.message || 'Errore connessione MetaApi';
     console.log('MetaApi error:', errMsg);
@@ -161,5 +192,5 @@ app.get('/dashboard/:slug', requireAuth, async (req, res) => {
   `);
 });
 
-// ====== AVVIO ======
+// ========== AVVIO ==========
 app.listen(PORT, () => console.log(`Server avviato su porta ${PORT}`));
