@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
-import MetaApi from 'metaapi.cloud-sdk';
+import MetaApiSDK from 'metaapi.cloud-sdk';
+const MetaApi = MetaApiSDK.default || MetaApiSDK;
 
 // ====== CONFIG ======
 const app = express();
